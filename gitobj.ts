@@ -44,6 +44,28 @@ export interface CommitInfo {
 }
 
 function parseIdent(line: string): { name: string; email: string; ts: number } {
+  // Fast path for the well-formed "Name <email> <ts> <tz>" shape; anything unusual falls back to
+  // the original regex, whose result this must match exactly.
+  const lt = line.indexOf(' <');
+  if (lt !== -1) {
+    const gt = line.indexOf('>', lt + 2);
+    if (gt !== -1) {
+      const rest = line.slice(gt + 1);
+      // rest must be " <digits> <+|-><4 digits>" and nothing else.
+      let i = 0;
+      if (rest.charCodeAt(i) === 0x20) {
+        i += 1;
+        const digitsStart = i;
+        while (i < rest.length && rest.charCodeAt(i) >= 0x30 && rest.charCodeAt(i) <= 0x39) i += 1;
+        if (i > digitsStart && rest.charCodeAt(i) === 0x20 && (rest.charCodeAt(i + 1) === 0x2b || rest.charCodeAt(i + 1) === 0x2d)) {
+          const tz = rest.slice(i + 2);
+          if (tz.length === 4 && /^\d{4}$/.test(tz)) {
+            return { name: line.slice(0, lt), email: line.slice(lt + 2, gt), ts: Number(rest.slice(digitsStart, i)) };
+          }
+        }
+      }
+    }
+  }
   const match = /^(.*?) <(.*?)> (\d+) [+-]\d{4}$/.exec(line);
   if (match === null) return { name: line, email: '', ts: 0 };
   return { name: match[1] ?? '', email: match[2] ?? '', ts: Number(match[3] ?? 0) };
@@ -234,7 +256,20 @@ export function commitClosure(store: Map<string, GitObject>, tips: readonly stri
 
 export function isAncestor(store: Map<string, GitObject>, ancestor: string, descendant: string): boolean {
   if (ancestor === descendant) return true;
-  return commitClosure(store, [descendant]).has(ancestor);
+  // Reachability walk with early exit: the same answer commitClosure(...).has(ancestor) gives,
+  // but the walk stops the moment the ancestor is reached instead of closing over all history.
+  const seen = new Set<string>();
+  const stack = [descendant];
+  while (stack.length > 0) {
+    const oid = stack.pop() as string;
+    if (seen.has(oid)) continue;
+    seen.add(oid);
+    const commit = commitOf(store, oid);
+    if (commit === null) continue;
+    if (oid === ancestor) return true;
+    for (const parent of commit.parents) stack.push(parent);
+  }
+  return false;
 }
 
 /** A best common ancestor of two commits (BFS from both), or null. */
@@ -292,8 +327,23 @@ function encodeObjectHeader(type: GitObjectType, size: number): Buffer {
   return Buffer.from(bytes);
 }
 
+/**
+ * Pack results are a pure function of the object list: an oid names immutable content and the
+ * store never replaces an object, so a pack built once stays correct for the store's lifetime.
+ * Repeated identical fetches (the common case for popular tips) reuse the built bytes. The cache
+ * is bounded per store and only holds packs whose every object was present when built.
+ */
+const packCaches = new WeakMap<Map<string, GitObject>, Map<string, Buffer>>();
+const PACK_CACHE_LIMIT = 16;
+
 /** Write a version-2 pack of the given objects (plain objects, no deltas). */
 export function writePack(store: Map<string, GitObject>, oids: readonly string[]): Buffer {
+  let cache = packCaches.get(store);
+  const key = oids.join(',');
+  if (cache !== undefined) {
+    const hit = cache.get(key);
+    if (hit !== undefined) return hit;
+  }
   const parts: Buffer[] = [];
   const header = Buffer.alloc(12);
   header.write('PACK', 0, 'ascii');
@@ -308,7 +358,16 @@ export function writePack(store: Map<string, GitObject>, oids: readonly string[]
   }
   const body = Buffer.concat(parts);
   const trailer = createHash('sha1').update(body).digest();
-  return Buffer.concat([body, trailer]);
+  const pack = Buffer.concat([body, trailer]);
+  if (oids.every((oid) => store.has(oid))) {
+    if (cache === undefined) {
+      cache = new Map();
+      packCaches.set(store, cache);
+    }
+    if (cache.size >= PACK_CACHE_LIMIT) cache.clear();
+    cache.set(key, pack);
+  }
+  return pack;
 }
 
 function readVarint(data: Buffer, offset: number): { value: number; next: number } {
