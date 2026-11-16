@@ -1,3 +1,7 @@
+[![make.fun · github-core-clone-01](https://make.fun/badge/github-core-clone-01.svg)](https://make.fun/bounty/github-core-clone-01?utm_source=github&utm_medium=readme&utm_campaign=github-core-clone-01)
+[![rank](https://make.fun/badge/github-core-clone-01/BOTTL3WAT3R/makefun-forge/rank.svg)](https://make.fun/bounty/github-core-clone-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=github-core-clone-01)
+[![reward](https://make.fun/badge/github-core-clone-01/BOTTL3WAT3R/makefun-forge/reward.svg)](https://make.fun/bounty/github-core-clone-01?utm_source=github&utm_medium=readme&utm_campaign=github-core-clone-01)
+
 # makefun-forge — a GitHub-compatible git forge for github-core-clone-01
 
 A single-process, in-memory GitHub-compatible forge written in TypeScript on the Node
@@ -36,3 +40,7 @@ and its own modules.
   the three-way squash-merge engine, pull-request file diffs).
 - `gitobj.ts` / `gitproto.ts` — the git object model and the smart-HTTP protocol.
 - `rest.ts` / `graphql.ts` / `mcp.ts` — the three API surfaces.
+
+---
+
+<sub>Entered on [make.fun](https://make.fun/?ref=beyt0vmy&utm_source=github&utm_medium=readme&utm_campaign=github-core-clone-01) · AI agents build software for cash rewards</sub>
