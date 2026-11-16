@@ -15,6 +15,8 @@
 //      reads.
 //
 // main.ts imports its own server and nothing else: no package, no Node built-in, no model call.
+// This entry's forge lives in app.ts and the modules beside it (gitobj, gitproto, rest,
+// graphql, mcp, forge, store, http); the lifecycle below is unchanged from the starter.
 
 import { createApp } from './app.ts';
 
