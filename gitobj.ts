@@ -144,6 +144,38 @@ export function parseTree(data: Buffer): TreeEntry[] {
   return entries;
 }
 
+// ---------------------------------------------------------------- parse caches
+
+// A stored object's bytes never change (an oid names its content and the store only ever adds),
+// so a parse of an object stays valid for the store's whole life. History walks and tree walks
+// re-read the same commits and trees constantly; caching their parses turns those walks into map
+// lookups. Each cache is bounded: on overflow it is cleared whole rather than evicted piecemeal.
+const PARSE_CACHE_LIMIT = 8192;
+const commitParseCaches = new WeakMap<Map<string, GitObject>, Map<string, CommitInfo>>();
+const treeParseCaches = new WeakMap<Map<string, GitObject>, Map<string, TreeEntry[]>>();
+
+function boundedParseCache<K, V>(caches: WeakMap<Map<string, GitObject>, Map<K, V>>, store: Map<string, GitObject>): Map<K, V> {
+  let cache = caches.get(store);
+  if (cache === undefined) {
+    cache = new Map();
+    caches.set(store, cache);
+  }
+  if (cache.size >= PARSE_CACHE_LIMIT) cache.clear();
+  return cache;
+}
+
+/** The entries of the tree object `oid` (parsed once per store, then reused); [] when absent. */
+export function treeEntriesOf(store: Map<string, GitObject>, oid: string): TreeEntry[] {
+  const object = store.get(oid);
+  if (object === undefined || object.type !== 'tree') return [];
+  const cache = boundedParseCache(treeParseCaches, store);
+  const hit = cache.get(oid);
+  if (hit !== undefined) return hit;
+  const parsed = parseTree(object.data);
+  cache.set(oid, parsed);
+  return parsed;
+}
+
 /** Git's tree sort key: directory names compare as if they ended in '/'. */
 function treeSortKey(entry: TreeEntry): string {
   return entry.mode === '40000' ? `${entry.name}/` : entry.name;
@@ -165,9 +197,7 @@ export function buildTreeData(entries: readonly TreeEntry[]): Buffer {
 
 /** Flatten a tree into path -> blob entry, recursing into subtrees. */
 export function flattenTree(store: Map<string, GitObject>, treeOid: string, prefix = '', out = new Map<string, { oid: string; mode: string }>()): Map<string, { oid: string; mode: string }> {
-  const tree = store.get(treeOid);
-  if (tree === undefined || tree.type !== 'tree') return out;
-  for (const entry of parseTree(tree.data)) {
+  for (const entry of treeEntriesOf(store, treeOid)) {
     const path = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
     if (entry.mode === '40000') flattenTree(store, entry.oid, path, out);
     else out.set(path, { oid: entry.oid, mode: entry.mode });
@@ -236,7 +266,12 @@ export function peelToCommit(store: Map<string, GitObject>, oid: string): string
 export function commitOf(store: Map<string, GitObject>, oid: string): CommitInfo | null {
   const object = store.get(oid);
   if (object === undefined || object.type !== 'commit') return null;
-  return parseCommit(object.data);
+  const cache = boundedParseCache(commitParseCaches, store);
+  const hit = cache.get(oid);
+  if (hit !== undefined) return hit;
+  const parsed = parseCommit(object.data);
+  cache.set(oid, parsed);
+  return parsed;
 }
 
 /** All commits reachable from `tips` (inclusive), following parents. */
@@ -297,19 +332,29 @@ export function mergeBase(store: Map<string, GitObject>, a: string, b: string): 
 export function listCommits(store: Map<string, GitObject>, tip: string): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
-  const visit = (oid: string): void => {
-    if (seen.has(oid)) return;
+  // Iterative DFS over an explicit stack: the same pre-order the recursive walk produced
+  // (parents pushed in reverse so the first parent is visited first), but a history of any
+  // depth can no longer overflow the call stack.
+  const stack: string[] = [tip];
+  while (stack.length > 0) {
+    const oid = stack.pop() as string;
+    if (seen.has(oid)) continue;
     const commit = commitOf(store, oid);
-    if (commit === null) return;
+    if (commit === null) continue;
     seen.add(oid);
     out.push(oid);
-    for (const parent of commit.parents) visit(parent);
-  };
-  visit(tip);
+    for (let i = commit.parents.length - 1; i >= 0; i -= 1) stack.push(commit.parents[i] as string);
+  }
   return out;
 }
 
 // ---------------------------------------------------------------- packs
+
+// The largest single object the pack path will materialize. Request bodies are capped at
+// 64 MiB (see the server module), so no object a client can legitimately send needs more room
+// than this; a stream or delta declaring more is a compression bomb, not an object, and is
+// refused before its bytes are ever built.
+const MAX_OBJECT_BYTES = 128 * 1024 * 1024;
 
 function encodeObjectHeader(type: GitObjectType, size: number): Buffer {
   const code = TYPE_CODES[type];
@@ -391,6 +436,11 @@ export function applyDelta(base: Buffer, delta: Buffer): Buffer {
   if (source.value !== base.length) throw new Error('delta base size mismatch');
   const target = readVarint(delta, pos);
   pos = target.next;
+  // Refuse an absurd declared output size up front, and stop the moment the ops have written
+  // past the declared size: a valid delta reaches it exactly, only at the very end, so neither
+  // check can fire on one — but a hostile delta can no longer inflate a tiny input into an
+  // unbounded buffer before the final size check gets a chance to run.
+  if (target.value > MAX_OBJECT_BYTES) throw new Error('delta target size too large');
   const out: Buffer[] = [];
   let written = 0;
   while (pos < delta.length) {
@@ -421,6 +471,7 @@ export function applyDelta(base: Buffer, delta: Buffer): Buffer {
     } else {
       throw new Error('delta opcode 0');
     }
+    if (written > target.value) throw new Error('delta target size mismatch');
   }
   const result = Buffer.concat(out);
   if (written !== target.value || result.length !== target.value) throw new Error('delta target size mismatch');
@@ -531,7 +582,9 @@ export function readPack(store: Map<string, GitObject>, pack: Buffer): string[] 
 }
 
 function inflateAt(buffer: Buffer, offset: number): { data: Buffer; next: number } {
-  const result = inflateSync(buffer.subarray(offset), { info: true }) as unknown as {
+  // maxOutputLength caps the inflation: a small deflated stream naming gigabytes of output is
+  // refused by zlib itself instead of exhausting memory before any size check could run.
+  const result = inflateSync(buffer.subarray(offset), { info: true, maxOutputLength: MAX_OBJECT_BYTES }) as unknown as {
     buffer: Buffer;
     engine: { bytesWritten: number };
   };

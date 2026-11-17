@@ -16,6 +16,7 @@ import {
   repoJson,
   userJson,
 } from './forge.ts';
+import { listCommits } from './gitobj.ts';
 import { bodyIsMalformedJson, fail, jsonBody, paginate, sendEmpty, sendJson, type Ctx } from './http.ts';
 import { resolveRef, VIEWER, type RepoRec } from './store.ts';
 
@@ -225,8 +226,13 @@ function handleRepo(ctx: Ctx, repo: RepoRec, rest: string[]): void {
         sendJson(ctx, 200, []);
         return;
       }
-      const page = paginate(ctx, commitsList(repo, tip), `${repoPath}/commits`);
-      sendJson(ctx, 200, page.items, page.link !== null ? { link: page.link } : {});
+      const page = paginate(ctx, listCommits(repo.objects, tip), `${repoPath}/commits`);
+      const items: Record<string, unknown>[] = [];
+      for (const oid of page.items) {
+        const json = commitJson(repo, oid);
+        if (json !== null) items.push(json);
+      }
+      sendJson(ctx, 200, items, page.link !== null ? { link: page.link } : {});
       return;
     }
     if (rest.length === 2 && method === 'GET') {
@@ -513,20 +519,4 @@ function handleRepo(ctx: Ctx, repo: RepoRec, rest: string[]): void {
   }
 
   fail(ctx, 404, 'Not Found');
-}
-
-function commitsList(repo: RepoRec, tip: string): Record<string, unknown>[] {
-  const out: Record<string, unknown>[] = [];
-  const seen = new Set<string>();
-  const visit = (oid: string): void => {
-    if (seen.has(oid)) return;
-    seen.add(oid);
-    const json = commitJson(repo, oid);
-    if (json === null) return;
-    out.push(json);
-    const parents = (json.parents as { sha: string }[]).map((parent) => parent.sha);
-    for (const parent of parents) visit(parent);
-  };
-  visit(tip);
-  return out;
 }

@@ -45,14 +45,16 @@ export function makeCtx(store: Store, req: IncomingMessage, res: ServerResponse,
 const JSON_TYPE = 'application/json; charset=utf-8';
 
 export function sendJson(ctx: Ctx, status: number, body: unknown, headers: Record<string, string> = {}): void {
-  const text = JSON.stringify(body);
+  // Encode once and reuse the bytes for both the length header and the body: the same bytes go
+  // on the wire as when the text was measured and then sent, without the second scan.
+  const payload = Buffer.from(JSON.stringify(body), 'utf8');
   ctx.res.writeHead(status, {
     'content-type': JSON_TYPE,
-    'content-length': Buffer.byteLength(text),
+    'content-length': payload.length,
     'x-github-request-id': ctx.requestId,
     ...headers,
   });
-  ctx.res.end(text);
+  ctx.res.end(payload);
 }
 
 export function sendEmpty(ctx: Ctx, status: number): void {

@@ -10,10 +10,10 @@ import {
   isAncestor,
   parsePktLines,
   parsePktLinesPrefix,
-  parseTree,
   peelToCommit,
   pktLine,
   readPack,
+  treeEntriesOf,
   writePack,
   ZERO_OID,
   type PktPacket,
@@ -267,9 +267,7 @@ function collectTreeObjects(store: RepoRec['objects'], treeOid: string, into: Se
   if (into.has(treeOid)) return;
   into.add(treeOid);
   if (list !== undefined) list.push(treeOid);
-  const tree = store.get(treeOid);
-  if (tree === undefined || tree.type !== 'tree') return;
-  for (const entry of parseTree(tree.data)) {
+  for (const entry of treeEntriesOf(store, treeOid)) {
     if (entry.mode === '40000') collectTreeObjects(store, entry.oid, into, list);
   }
 }

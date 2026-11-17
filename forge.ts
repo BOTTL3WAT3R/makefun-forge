@@ -9,8 +9,8 @@ import {
   listCommits,
   mergeBase,
   parseCommit,
-  parseTree,
   storeObject,
+  treeEntriesOf,
   unflattenTree,
   ZERO_OID,
 } from './gitobj.ts';
@@ -232,7 +232,7 @@ export function readContent(repo: RepoRec, commitOid: string, path: string): Con
     for (let i = 0; i < segments.length; i += 1) {
       const tree = repo.objects.get(treeOid);
       if (tree === undefined || tree.type !== 'tree') return null;
-      const entry = parseTree(tree.data).find((candidate) => candidate.name === segments[i]);
+      const entry = treeEntriesOf(repo.objects, treeOid).find((candidate) => candidate.name === segments[i]);
       if (entry === undefined) return null;
       if (i === segments.length - 1) {
         if (entry.mode === '40000') {
@@ -248,7 +248,7 @@ export function readContent(repo: RepoRec, commitOid: string, path: string): Con
   }
   const tree = repo.objects.get(treeOid);
   if (tree === undefined || tree.type !== 'tree') return null;
-  const entries = parseTree(tree.data).map((entry) => ({
+  const entries = treeEntriesOf(repo.objects, treeOid).map((entry) => ({
     name: entry.name,
     path: path === '' ? entry.name : `${path}/${entry.name}`,
     oid: entry.oid,
